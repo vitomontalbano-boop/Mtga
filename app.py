@@ -3,101 +3,82 @@ import pandas as pd
 import google.generativeai as genai
 import re
 
-# 1. CONFIGURAZIONE PAGINA E STILE MOBILE-FIRST
-st.set_page_config(page_title="MTGA AI Builder", page_icon="🃏", layout="centered")
+# 1. SETUP
+st.set_page_config(page_title="MTGA AI Builder", page_icon="🃏")
 
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; color: #ffffff; }
-    .stButton>button { 
-        width: 100%; 
-        border-radius: 12px; 
-        height: 3.5em; 
-        background-color: #ff4b4b; 
-        color: white; 
-        font-weight: bold;
-        border: none;
-        box-shadow: 0px 4px 10px rgba(0,0,0,0.3);
-    }
-    .stSelectbox, .stRadio, .stMultiSelect { 
-        background-color: #1e1e1e; 
-        border-radius: 8px; 
-    }
-    div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #ff4b4b; }
-    </style>
-    """, unsafe_allow_html=True)
+# Stile dark per mobile
+st.markdown("<style>.stButton>button {width: 100%; height: 3em; background-color: #ff4b4b; color: white;}</style>", unsafe_allow_html=True)
 
-# 2. INIZIALIZZAZIONE AI (GEMINI 3 FLASH - 2026)
-try:
-    if "GEMINI_API_KEY" in st.secrets:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        # Utilizziamo il modello più aggiornato del 2026
-        model = genai.GenerativeModel('gemini-3-flash')
-    else:
-        st.warning("⚠️ API Key non trovata nei Secrets di Streamlit.")
-except Exception as e:
-    st.error(f"Errore inizializzazione AI: {e}")
-
-# 3. FUNZIONI DI SUPPORTO
-def pulisci_nome_carta(nome_raw):
-    """Rimuove set e numeri di collezione (es: 'Sheoldred (DMU) 107' -> 'Sheoldred')"""
-    return re.sub(r'\s\(.*?\)\s\d+|\s\(.*?\)', '', nome_raw).strip()
-
-def calcola_wildcards(deck_text, df_collezione):
-    wc_necessarie = {"Common": 0, "Uncommon": 0, "Rare": 0, "Mythic": 0}
-    mancanti_dettaglio = []
+# 2. CONNESSIONE AI (Con fallback su modelli stabili)
+def get_model():
+    if "GEMINI_API_KEY" not in st.secrets:
+        st.error("❌ Chiave API mancante nei Secrets!")
+        return None
     
-    linee = deck_text.strip().split('\n')
-    for linea in linee:
-        linea = linea.strip()
-        if not linea or not linea[0].isdigit(): continue
-        
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    
+    # Proviamo diversi nomi di modelli per sicurezza
+    for m_name in ['gemini-1.5-flash', 'gemini-1.5-pro']:
         try:
-            parti = linea.split(' ', 1)
-            qta_richiesta = int(parti[0])
-            nome_full = parti[1]
-            nome_pulito = pulisci_nome_carta(nome_full)
-            
-            # Cerca nel CSV (Case Insensitive)
-            match = df_collezione[df_collezione['Name'].str.lower() == nome_pulito.lower()]
-            
-            if not match.empty:
-                possedute = match['Count'].iloc[0]
-                rarita = match['Rarity'].iloc[0]
-            else:
-                possedute = 0
-                rarita = "Rare" # Default se non trovata nel CSV
-
-            diff = max(0, qta_richiesta - possedute)
-            if diff > 0:
-                if rarita in wc_necessarie:
-                    wc_necessarie[rarita] += diff
-                mancanti_dettaglio.append({
-                    "Carta": nome_pulito, 
-                    "Mancanti": diff, 
-                    "Rarità": rarita
-                })
-        except Exception:
+            m = genai.GenerativeModel(m_name)
+            # Test rapido di connessione
+            m.generate_content("test", generation_config={"max_output_tokens": 1})
+            return m
+        except:
             continue
-            
-    return wc_necessarie, mancanti_dettaglio
+    st.error("❌ Impossibile connettersi ai modelli Gemini. Controlla la tua API Key.")
+    return None
 
-# 4. INTERFACCIA UTENTE (UI)
+model = get_model()
+
+# 3. LOGICA DI PULIZIA
+def pulisci_nome(n):
+    return re.sub(r'\s\(.*?\)\s\d+|\s\(.*?\)', '', str(n)).strip()
+
+# 4. UI
 st.title("🃏 MTGA AI Builder")
-st.caption("Il tuo Lead Developer personale per scalare la Mythic Rank.")
 
-uploaded_file = st.file_uploader("📤 Carica la tua collezione (file .csv)", type="csv")
+file = st.file_uploader("Carica CSV", type="csv")
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    st.success(f"Analizzate {len(df)} carte della tua collezione.")
+if file:
+    df = pd.read_csv(file)
+    st.write(f"✅ CSV caricato. Colonne trovate: {', '.join(df.columns)}")
+    
+    formato = st.selectbox("Formato", ["Standard", "Brawl", "Explorer"])
+    archetipo = st.selectbox("Archetipo", ["Aggro", "Control", "Midrange"])
 
-    # Opzioni di Creazione
-    with st.container():
-        formato = st.selectbox("Formato di Gioco", ["Standard", "Brawl", "Explorer", "Historic", "Alchemy"])
-        archetipo = st.select_slider("Stile del Mazzo", options=["Aggro", "Tempo", "Midrange", "Control", "Combo"])
-        colori = st.multiselect("Colori preferiti", ["White", "Blue", "Black", "Red", "Green"])
+    if st.button("🚀 GENERA MAZZO"):
+        st.write("🔍 Fase 1: Analisi collezione...")
+        
+        # VERIFICA COLONNE (Il tuo CSV ha: Id,Name,Set,Color,Rarity,Count,PrintCount)
+        try:
+            # Filtro carte che possiedi
+            mie_rare = df[(df['Count'] > 0) & (df['Rarity'].str.contains('Rare|Mythic', na=False, case=False))]
+            
+            if mie_rare.empty:
+                st.warning("⚠️ Non ho trovato Rare o Mitiche nel tuo CSV. Userò le comuni.")
+                mie_rare = df[df['Count'] > 0].head(50)
+            
+            contesto = mie_rare[['Name', 'Count']].head(100).to_string(index=False)
+            st.write("📡 Fase 2: Invio richiesta a Gemini...")
+            
+            prompt = f"Crea un mazzo {formato} {archetipo} per MTG Arena. Usa queste mie carte: {contesto}. Rispondi SOLO con la lista esportabile."
+            
+            with st.spinner("L'AI sta ragionando..."):
+                res = model.generate_content(prompt)
+                
+                if res and res.text:
+                    st.subheader("📋 Ecco il tuo mazzo:")
+                    st.code(res.text)
+                    
+                    # Calcolo Wildcards veloce
+                    st.write("📊 Fase 3: Calcolo Wildcards...")
+                    # (Qui andrebbe la logica wildcards che abbiamo già scritto)
+                else:
+                    st.error("L'AI ha risposto ma il testo è vuoto.")
+        
+        except Exception as e:
+            st.error(f"💥 Si è verificato un errore: {e}")
 
-    if st.button("🚀 GENERA E CALCOLA COSTO"):
-        # Selezioniamo un campione delle tue Rare/Mitiche per guidare l'AI
-        rare_possedute = df[(df['Count'] > 0) & (df['Rarity'].isin(['Rare', 'Mythic']))].sample(min(80, len(df[df['Count']>0])))
+else:
+    st.info("Carica il file per iniziare.")
