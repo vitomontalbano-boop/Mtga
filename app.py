@@ -20,7 +20,7 @@ st.markdown("""
     .stButton>button { width: 100%; border-radius: 10px; height: 3em; background-color: #ff4b4b; color: white; font-weight: bold; }
     .stSelectbox, .stRadio { background-color: #1e1e1e; border-radius: 10px; }
     </style>
-    """, unsafe_allow_stdio=True)
+    """, unsafe_allow_html=True)
 
 # 2. FUNZIONE LOGICA: CALCOLO WILDCARDS
 def calcola_mancanti(deck_text, df_collezione):
