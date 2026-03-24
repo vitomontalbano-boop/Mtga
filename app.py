@@ -9,7 +9,7 @@ st.set_page_config(page_title="MTGA AI Deck Builder", page_icon="🃏", layout="
 # Recupero API Key dai Secrets di Streamlit
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash') # Versione veloce ed efficiente
+    model = genai.GenerativeModel('gemini-3-flash') # Versione veloce ed efficiente
 except Exception as e:
     st.error("Configura la GEMINI_API_KEY nei Secrets di Streamlit per far funzionare l'AI.")
 
