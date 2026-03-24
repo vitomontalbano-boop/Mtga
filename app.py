@@ -3,82 +3,149 @@ import pandas as pd
 import google.generativeai as genai
 import re
 
-# 1. SETUP
-st.set_page_config(page_title="MTGA AI Builder", page_icon="🃏")
+# --- 1. CONFIGURAZIONE INTERFACCIA ---
+st.set_page_config(page_title="MTGA AI Builder", page_icon="🃏", layout="centered")
 
-# Stile dark per mobile
-st.markdown("<style>.stButton>button {width: 100%; height: 3em; background-color: #ff4b4b; color: white;}</style>", unsafe_allow_html=True)
+# Style CSS per Android (Dark Mode e Bottoni Grandi)
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; color: white; }
+    .stButton>button { 
+        width: 100%; border-radius: 12px; height: 3.5em; 
+        background-color: #ff4b4b; color: white; font-weight: bold; border: none;
+    }
+    div[data-testid="stMetricValue"] { color: #ff4b4b; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# 2. CONNESSIONE AI (Con fallback su modelli stabili)
-def get_model():
+# --- 2. CONNESSIONE AI DINAMICA (Fix per Errore 404) ---
+def inizializza_ai():
     if "GEMINI_API_KEY" not in st.secrets:
-        st.error("❌ Chiave API mancante nei Secrets!")
+        st.error("❌ Chiave API mancante nei Secrets di Streamlit!")
         return None
     
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    try:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        # Cerchiamo i modelli disponibili che supportano la generazione di contenuti
+        available_models = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        
+        if not available_models:
+            st.error("❌ Nessun modello compatibile trovato per questa API Key.")
+            return None
+        
+        # Priorità: Gemini 3 Flash -> Gemini 1.5 Flash -> Il primo disponibile
+        selected = next((m for m in available_models if "gemini-3-flash" in m), 
+                   next((m for m in available_models if "gemini-1.5-flash" in m), 
+                   available_models[0]))
+        
+        return genai.GenerativeModel(selected), selected
+    except Exception as e:
+        st.error(f"❌ Errore durante la connessione a Google AI: {e}")
+        return None, None
+
+model_result = inizializza_ai()
+model = model_result[0] if model_result else None
+model_name = model_result[1] if model_result else ""
+
+# --- 3. LOGICA DI CALCOLO ---
+def pulisci_nome(nome):
+    # Rimuove (SET) e numeri di collezione (es: "Sheoldred (DMU) 107" -> "Sheoldred")
+    return re.sub(r'\s\(.*?\)\s\d+|\s\(.*?\)', '', str(nome)).strip()
+
+def analizza_costi(deck_text, df_collezione):
+    wc_needed = {"Common": 0, "Uncommon": 0, "Rare": 0, "Mythic": 0}
+    missing_details = []
     
-    # Proviamo diversi nomi di modelli per sicurezza
-    for m_name in ['gemini-1.5-flash', 'gemini-1.5-pro']:
+    lines = deck_text.strip().split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line or not line[0].isdigit(): continue
+        
         try:
-            m = genai.GenerativeModel(m_name)
-            # Test rapido di connessione
-            m.generate_content("test", generation_config={"max_output_tokens": 1})
-            return m
-        except:
-            continue
-    st.error("❌ Impossibile connettersi ai modelli Gemini. Controlla la tua API Key.")
-    return None
+            parts = line.split(' ', 1)
+            qty = int(parts[0])
+            name = pulisci_nome(parts[1])
+            
+            # Match con la collezione (Case Insensitive)
+            match = df_collezione[df_collezione['Name'].str.lower() == name.lower()]
+            
+            if not match.empty:
+                owned = match['Count'].iloc[0]
+                rarity = match['Rarity'].iloc[0]
+            else:
+                owned, rarity = 0, "Rare"
 
-model = get_model()
+            diff = max(0, qty - owned)
+            if diff > 0:
+                if rarity in wc_needed: wc_needed[rarity] += diff
+                missing_details.append({"Carta": name, "Mancanti": diff, "Rarità": rarity})
+        except: continue
+            
+    return wc_needed, missing_details
 
-# 3. LOGICA DI PULIZIA
-def pulisci_nome(n):
-    return re.sub(r'\s\(.*?\)\s\d+|\s\(.*?\)', '', str(n)).strip()
-
-# 4. UI
+# --- 4. INTERFACCIA UTENTE ---
 st.title("🃏 MTGA AI Builder")
+if model_name:
+    st.caption(f"🤖 Connesso via: {model_name}")
 
-file = st.file_uploader("Carica CSV", type="csv")
+file = st.file_uploader("Carica il tuo CSV di MTGA", type="csv")
 
 if file:
     df = pd.read_csv(file)
-    st.write(f"✅ CSV caricato. Colonne trovate: {', '.join(df.columns)}")
-    
-    formato = st.selectbox("Formato", ["Standard", "Brawl", "Explorer"])
-    archetipo = st.selectbox("Archetipo", ["Aggro", "Control", "Midrange"])
+    st.success(f"✅ {len(df)} carte caricate correttamente.")
 
-    if st.button("🚀 GENERA MAZZO"):
-        st.write("🔍 Fase 1: Analisi collezione...")
-        
-        # VERIFICA COLONNE (Il tuo CSV ha: Id,Name,Set,Color,Rarity,Count,PrintCount)
-        try:
-            # Filtro carte che possiedi
-            mie_rare = df[(df['Count'] > 0) & (df['Rarity'].str.contains('Rare|Mythic', na=False, case=False))]
+    col1, col2 = st.columns(2)
+    with col1:
+        fmt = st.selectbox("Formato", ["Standard", "Brawl", "Explorer", "Historic"])
+    with col2:
+        arc = st.selectbox("Archetipo", ["Aggro", "Control", "Midrange", "Tempo", "Combo"])
+
+    if st.button("🚀 GENERA MAZZO E CALCOLA COSTI"):
+        if not model:
+            st.error("AI non pronta. Controlla la chiave API.")
+        else:
+            # Filtriamo le Rare/Mitiche possedute per dare contesto all'AI
+            owned_cards = df[(df['Count'] > 0) & (df['Rarity'].str.contains('Rare|Mythic', na=False))]
+            context = owned_cards[['Name', 'Count']].sample(min(len(owned_cards), 60)).to_string(index=False)
+
+            prompt = f"""
+            Sei un esperto di MTG Arena. Crea un mazzo {fmt} di tipo {arc}.
+            Usa prioritariamente queste carte che possiedo:
+            {context}
             
-            if mie_rare.empty:
-                st.warning("⚠️ Non ho trovato Rare o Mitiche nel tuo CSV. Userò le comuni.")
-                mie_rare = df[df['Count'] > 0].head(50)
-            
-            contesto = mie_rare[['Name', 'Count']].head(100).to_string(index=False)
-            st.write("📡 Fase 2: Invio richiesta a Gemini...")
-            
-            prompt = f"Crea un mazzo {formato} {archetipo} per MTG Arena. Usa queste mie carte: {contesto}. Rispondi SOLO con la lista esportabile."
-            
-            with st.spinner("L'AI sta ragionando..."):
-                res = model.generate_content(prompt)
-                
-                if res and res.text:
-                    st.subheader("📋 Ecco il tuo mazzo:")
-                    st.code(res.text)
+            Rispondi SOLO con la lista in formato ESPORTABILE MTGA (es: 4 Nome Carta).
+            Includi terre base. Niente commenti o introduzioni.
+            """
+
+            with st.spinner("L'AI sta creando la tua strategia..."):
+                try:
+                    response = model.generate_content(prompt)
+                    deck_list = response.text
                     
-                    # Calcolo Wildcards veloce
-                    st.write("📊 Fase 3: Calcolo Wildcards...")
-                    # (Qui andrebbe la logica wildcards che abbiamo già scritto)
-                else:
-                    st.error("L'AI ha risposto ma il testo è vuoto.")
-        
-        except Exception as e:
-            st.error(f"💥 Si è verificato un errore: {e}")
+                    if deck_list:
+                        st.subheader("📋 Lista Mazzo")
+                        st.code(deck_list, language="text")
 
+                        # Calcolo Wildcards
+                        wcs, details = analizza_costi(deck_list, df)
+                        
+                        st.divider()
+                        st.subheader("💰 Wildcards Necessarie")
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("C", wcs['Common'])
+                        c2.metric("U", wcs['Uncommon'])
+                        c3.metric("R", wcs['Rare'])
+                        c4.metric("M", wcs['Mythic'])
+
+                        if details:
+                            with st.expander("🔎 Dettaglio carte da creare"):
+                                st.table(details)
+                    else:
+                        st.error("L'AI ha restituito una risposta vuota. Riprova.")
+                except Exception as e:
+                    st.error(f"Errore durante la generazione: {e}")
 else:
-    st.info("Carica il file per iniziare.")
+    st.info("Carica il file CSV per iniziare la creazione.")
