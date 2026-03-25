@@ -3,10 +3,10 @@ import pandas as pd
 import google.generativeai as genai
 import re
 
-# --- 1. CONFIGURAZIONE INTERFACCIA (Ripristino Layout Originale) ---
+# --- 1. CONFIGURAZIONE INTERFACCIA (Layout Centered) ---
 st.set_page_config(page_title="MTGA AI Builder 3.1", page_icon="🃏", layout="centered")
 
-# CSS personalizzato: Dark Mode Arena
+# Stile Arena: Dark Mode con accenti verdi
 st.markdown("""
     <style>
     .main { background-color: #0e1117; color: white; }
@@ -16,55 +16,60 @@ st.markdown("""
         box-shadow: 0px 4px 10px rgba(0,0,0,0.2);
     }
     div[data-testid="stMetricValue"] { color: #28a745; }
-    .stSelectbox, .stMultiSelect { color: white; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. CONNESSIONE AI (Gemini 3 Flash) ---
+# --- 2. CONNESSIONE AI (Fix 404 & Supporto 3.1) ---
 def inizializza_ai():
     if "GEMINI_API_KEY" not in st.secrets:
-        st.error("❌ Chiave API mancante!")
-        return None
+        st.error("❌ Chiave API mancante nei Secrets!")
+        return None, None
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        # Utilizzo del modello richiesto
-        return genai.GenerativeModel("gemini-3-flash")
+        # Cerchiamo i modelli disponibili per evitare il 404
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # Priorità: 3.1 Flash -> 3 Flash -> fallback su 1.5
+        selected = next((m for m in models if "gemini-3.1-flash" in m), None)
+        if not selected:
+            selected = next((m for m in models if "gemini-3-flash" in m), models[0])
+            
+        return genai.GenerativeModel(selected), selected
     except Exception as e:
-        st.error(f"Errore di connessione: {e}")
-        return None
+        st.error(f"Errore connessione AI: {e}")
+        return None, None
 
-model_ai = inizializza_ai()
+model_ai, model_name = inizializza_ai()
 
-# --- 3. DATI ARCHETIPI (Sync Untapped.gg 2026) ---
-META_DATA = {
-    "Standard": ["Golgari Midrange", "Azorius Control", "Mono-Red Aggro", "Boros Convoke", "Dimir Tempo", "Simic Artifacts"],
-    "Explorer": ["Rakdos Vampires", "Izzet Phoenix", "Amalia Combo", "Azorius Control", "Abzan Greasefang"],
-    "Historic": ["Izzet Wizards", "Mono-Green Devotion", "Sultai Yawgmoth", "Boros Energy"],
-    "Brawl": ["Standard Brawl", "Historic Brawl (100 Cards)"],
-    "Alchemy": ["Heist Control", "Mono-White Lifegain"]
+# --- 3. DATI ARCHETIPI (Untapped.gg 2026) ---
+META_ARCHETYPES = {
+    "Standard": ["Golgari Midrange", "Azorius Control", "Boros Convoke", "Mono-Red Aggro", "Dimir Tempo", "Simic Artifacts"],
+    "Explorer": ["Rakdos Vampires", "Izzet Phoenix", "Amalia Combo", "Mono-White Humans", "Azorius Control"],
+    "Historic": ["Izzet Wizards", "Mono-Green Elves", "Rakdos Midrange", "Boros Energy"],
+    "Brawl": ["Standard Brawl", "Historic Brawl (100 Carte)"]
 }
 
-# --- 4. LOGICA DI ANALISI ---
+# --- 4. LOGICA DI CALCOLO ---
 def analizza_mazzo_ita(testo_mazzo, df_collezione):
     wc_necessarie = {"Common": 0, "Uncommon": 0, "Rare": 0, "Mythic": 0}
     dettaglio_mancanti = []
     
-    # Regex per catturare "Quantità NomeCarta"
+    # Estrazione righe: es "4 Tutore Illuminato"
     linee = re.findall(r"(\d+)\s+(.+)", testo_mazzo)
-    for qta_str, nome_carta in linee:
-        qta_richiesta = int(qta_str)
+    for qta, nome_carta in linee:
+        qta = int(qta)
         nome_carta = nome_carta.strip()
         
-        # Match flessibile nel CSV
+        # Match flessibile (case-insensitive e parziale)
         match = df_collezione[df_collezione['Name'].str.contains(nome_carta, case=False, na=False)]
         
         if not match.empty:
             possedute = match['Count'].iloc[0]
             rarita = match['Rarity'].iloc[0]
         else:
-            possedute, rarita = 0, "Rare" # Default cautelativo
+            possedute, rarita = 0, "Rare"
 
-        mancanti = max(0, qta_richiesta - possedute)
+        mancanti = max(0, qta - possedute)
         if mancanti > 0:
             if rarita in wc_necessarie: wc_necessarie[rarita] += mancanti
             dettaglio_mancanti.append({"Carta": nome_carta, "Mancanti": mancanti, "Rarità": rarita})
@@ -73,53 +78,56 @@ def analizza_mazzo_ita(testo_mazzo, df_collezione):
 
 # --- 5. INTERFACCIA UTENTE ---
 st.title("🃏 MTGA AI Builder 3.1")
-st.write("Generatore di mazzi basato sul meta di **Untapped.gg** e la tua collezione.")
+st.write("Crea mazzi ottimizzati basati sulla tua collezione reale.")
 
-file = st.file_uploader("Carica il tuo export CSV", type="csv")
+if model_name:
+    st.caption(f"🤖 Modello Attivo: **{model_name}**")
+
+file = st.file_uploader("Carica il tuo file CSV (Italiano)", type="csv")
 
 if file:
     df = pd.read_csv(file)
-    df.columns = [c.strip() for c in df.columns] # Pulizia nomi colonne
-    st.success(f"✅ Collezione caricata con successo.")
+    df.columns = [c.strip() for c in df.columns]
+    st.success(f"✅ Collezione caricata: {len(df)} carte trovate.")
 
-    # Selettori Archetipo e Colori
-    formato = st.selectbox("Seleziona Formato", list(META_DATA.keys()))
-    archetipo = st.selectbox("Archetipo (Meta Untapped.gg)", META_DATA[formato])
-    colori = st.multiselect("Colori del Mazzo", ["White", "Blue", "Black", "Red", "Green"])
+    # Input Utente
+    formato = st.selectbox("Formato", list(META_ARCHETYPES.keys()))
+    archetipo = st.selectbox("Archetipo (Meta Untapped.gg)", META_ARCHETYPES[formato])
+    colori = st.multiselect("Colori preferiti", ["White", "Blue", "Black", "Red", "Green"])
 
     if st.button("🚀 GENERA E ANALIZZA MAZZO"):
-        # Campionamento collezione per contesto (Priorità Rare/Mitiche)
+        # Campionamento collezione per contesto (Top 80 carte rare/mitiche)
         mie_carte = df[df['Count'] > 0].sort_values(by='Rarity', ascending=False).head(80)
         contesto = mie_carte[['Name', 'Count']].to_string(index=False)
 
         prompt = f"""
-        Sei un Pro Player di MTG Arena. Crea un mazzo {formato} di tipo {archetipo}.
-        Colori richiesti: {', '.join(colori)}.
+        Sei un Pro Player di Magic Arena. Crea un mazzo {formato} di tipo {archetipo} in ITALIANO.
+        Colori: {', '.join(colori)}.
         
-        REGOLE FONDAMENTALI:
-        1. ANALISI: Controlla gli effetti delle carte, il costo di mana (CMC) e la SINERGIA complessiva.
-        2. LISTA: Fornisci SOLO la lista esportabile MTGA (es: 4 Nome Carta).
-        3. LINGUA: Usa esclusivamente i nomi delle carte in ITALIANO.
-        4. OTTIMIZZAZIONE: Usa il più possibile queste carte che possiedo:
+        REGOLE:
+        1. Analizza attentamente la SINERGIA e la CURVA DI MANA.
+        2. Rispondi SOLO con la lista esportabile MTGA (es: 4 Nome Carta).
+        3. Usa NOMI IN ITALIANO.
+        4. Priorità massima a queste carte che già possiedo:
         {contesto}
         """
 
-        with st.spinner("L'AI sta assemblando il mazzo perfetto..."):
+        with st.spinner("L'AI sta consultando il meta e la tua collezione..."):
             try:
                 risposta = model_ai.generate_content(prompt)
-                testo_output = risposta.text
+                lista_mazzo = risposta.text
                 
-                # Pulizia testo per estrarre solo la lista
-                lista_clean = "\n".join([l for l in testo_output.split('\n') if re.match(r'^\d+\s', l)])
+                # Pulizia lista per il calcolo
+                lista_clean = "\n".join([l for l in lista_mazzo.split('\n') if re.match(r'^\d+\s', l)])
                 
-                st.subheader("📋 Lista Mazzo Esportabile")
+                st.subheader("📋 Lista Mazzo (Italiano)")
                 st.code(lista_clean, language="text")
                 
                 # Analisi Wildcards
                 wcs, mancanti = analizza_mazzo_ita(lista_clean, df)
                 
                 st.divider()
-                st.subheader("💰 Bilancio Wildcards")
+                st.subheader("💰 Costo Wildcards")
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Comuni", wcs['Common'])
                 c2.metric("Non Comuni", wcs['Uncommon'])
@@ -127,16 +135,13 @@ if file:
                 c4.metric("Mitiche", wcs['Mythic'])
 
                 if mancanti:
-                    with st.expander("🔎 Dettaglio carte da craftare"):
+                    with st.expander("🔎 Dettaglio carte mancanti"):
                         st.table(mancanti)
                 else:
                     st.balloons()
-                    st.success("Ottimo! Hai tutte le carte per questo mazzo.")
+                    st.success("Mazzo pronto! Hai tutte le carte necessarie.")
                     
             except Exception as e:
-                st.error(f"Errore nella generazione: {e}")
+                st.error(f"Errore generazione: {e}")
 else:
-    st.info("Trascina il tuo CSV per iniziare l'analisi personalizzata.")
-
-st.divider()
-st.caption("Powered by Gemini 3 Flash | Data based on Untapped.gg Meta 2026")
+    st.info("Trascina qui il tuo CSV per iniziare.")
