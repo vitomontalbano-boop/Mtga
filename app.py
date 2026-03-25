@@ -2,149 +2,141 @@ import streamlit as st
 import pandas as pd
 import google.generativeai as genai
 import re
-from typing import List, Dict
 
-# --- 1. CONFIGURAZIONE E STILE ---
-st.set_page_config(page_title="MTGA AI Builder Pro", page_icon="🔥", layout="wide")
+# --- 1. CONFIGURAZIONE INTERFACCIA (Ripristino Layout Originale) ---
+st.set_page_config(page_title="MTGA AI Builder 3.1", page_icon="🃏", layout="centered")
 
+# CSS personalizzato: Dark Mode Arena
 st.markdown("""
     <style>
-    .stApp { background-color: #0e1117; color: #e0e0e0; }
+    .main { background-color: #0e1117; color: white; }
     .stButton>button { 
-        background: linear-gradient(45deg, #28a745, #1e7e34);
-        color: white; border: none; font-weight: bold;
-        transition: 0.3s; border-radius: 8px;
+        width: 100%; border-radius: 12px; height: 3.5em; 
+        background-color: #28a745; color: white; font-weight: bold; border: none;
+        box-shadow: 0px 4px 10px rgba(0,0,0,0.2);
     }
-    .stButton>button:hover { transform: scale(1.02); box-shadow: 0 4px 15px rgba(40,167,69,0.4); }
-    .card-stats { background-color: #1c2128; padding: 15px; border-radius: 10px; border-left: 5px solid #28a745; }
+    div[data-testid="stMetricValue"] { color: #28a745; }
+    .stSelectbox, .stMultiSelect { color: white; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. DATI ARCHETIPI (Sincronizzati con meta Untapped.gg 2026) ---
-META_ARCHETYPES = {
-    "Standard": ["Mono-Red Aggro", "Azorius Control", "Golgari Midrange", "Boros Convoke", "Dimir Midrange", "Esper Legends", "5-Color Ramp"],
-    "Explorer": ["Rakdos Vampires", "Izzet Phoenix", "Amalia Combo", "Mono-White Humans", "Azorius Control", "Abzan Greasefang"],
-    "Historic": ["Izzet Wizards", "Mono-Green Elves", "Rakdos Midrange", "Sultai Yawgmoth", "Kethis Combo"],
-    "Brawl": ["100-Card Singleton (Commander)", "Aggro", "Control", "Combo", "Tribal"],
-    "Alchemy": ["Heist Decks", "Mono-Black Control", "Red Deck Wins"]
-}
-
-# --- 3. LOGICA CORE ---
+# --- 2. CONNESSIONE AI (Gemini 3 Flash) ---
 def inizializza_ai():
     if "GEMINI_API_KEY" not in st.secrets:
-        st.error("🔑 API Key non trovata!")
+        st.error("❌ Chiave API mancante!")
         return None
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    return genai.GenerativeModel('gemini-1.5-flash')
+    try:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        # Utilizzo del modello richiesto
+        return genai.GenerativeModel("gemini-3-flash")
+    except Exception as e:
+        st.error(f"Errore di connessione: {e}")
+        return None
 
-def get_mana_icons(colors):
-    mapping = {"White": "☀️", "Blue": "💧", "Black": "💀", "Red": "🔥", "Green": "🌳"}
-    return " ".join([mapping[c] for c in colors])
+model_ai = inizializza_ai()
 
-def analizza_mazzo(testo_mazzo, df_collezione):
-    wc_costo = {"Common": 0, "Uncommon": 0, "Rare": 0, "Mythic": 0}
-    mancanti = []
+# --- 3. DATI ARCHETIPI (Sync Untapped.gg 2026) ---
+META_DATA = {
+    "Standard": ["Golgari Midrange", "Azorius Control", "Mono-Red Aggro", "Boros Convoke", "Dimir Tempo", "Simic Artifacts"],
+    "Explorer": ["Rakdos Vampires", "Izzet Phoenix", "Amalia Combo", "Azorius Control", "Abzan Greasefang"],
+    "Historic": ["Izzet Wizards", "Mono-Green Devotion", "Sultai Yawgmoth", "Boros Energy"],
+    "Brawl": ["Standard Brawl", "Historic Brawl (100 Cards)"],
+    "Alchemy": ["Heist Control", "Mono-White Lifegain"]
+}
+
+# --- 4. LOGICA DI ANALISI ---
+def analizza_mazzo_ita(testo_mazzo, df_collezione):
+    wc_necessarie = {"Common": 0, "Uncommon": 0, "Rare": 0, "Mythic": 0}
+    dettaglio_mancanti = []
     
+    # Regex per catturare "Quantità NomeCarta"
     linee = re.findall(r"(\d+)\s+(.+)", testo_mazzo)
-    for qta, nome in linee:
-        qta = int(qta)
-        nome = nome.strip()
+    for qta_str, nome_carta in linee:
+        qta_richiesta = int(qta_str)
+        nome_carta = nome_carta.strip()
         
-        # Matching flessibile
-        match = df_collezione[df_collezione['Name'].str.contains(nome, case=False, na=False)]
+        # Match flessibile nel CSV
+        match = df_collezione[df_collezione['Name'].str.contains(nome_carta, case=False, na=False)]
         
         if not match.empty:
             possedute = match['Count'].iloc[0]
             rarita = match['Rarity'].iloc[0]
         else:
-            possedute, rarita = 0, "Rare" # Default se ignota
+            possedute, rarita = 0, "Rare" # Default cautelativo
 
-        if possedute < qta:
-            diff = qta - possedute
-            if rarita in wc_costo: wc_costo[rarita] += diff
-            mancanti.append({"Carta": nome, "Mancano": diff, "Rarità": rarita})
+        mancanti = max(0, qta_richiesta - possedute)
+        if mancanti > 0:
+            if rarita in wc_necessarie: wc_necessarie[rarita] += mancanti
+            dettaglio_mancanti.append({"Carta": nome_carta, "Mancanti": mancanti, "Rarità": rarita})
             
-    return wc_costo, mancanti
+    return wc_necessarie, dettaglio_mancanti
 
-# --- 4. INTERFACCIA ---
-model = inizializza_ai()
+# --- 5. INTERFACCIA UTENTE ---
+st.title("🃏 MTGA AI Builder 3.1")
+st.write("Generatore di mazzi basato sul meta di **Untapped.gg** e la tua collezione.")
 
-with st.sidebar:
-    st.title("⚙️ Configurazione")
-    file = st.file_uploader("Carica Collezione (CSV)", type="csv")
-    st.divider()
-    formato = st.selectbox("Formato Meta", list(META_ARCHETYPES.keys()))
-    archetipo = st.selectbox("Scegli Archetipo", META_ARCHETYPES[formato])
-    colori = st.multiselect("Identità di Colore", ["White", "Blue", "Black", "Red", "Green"], default=["Red"])
-    
-    st.info("L'AI darà priorità alle carte che già possiedi per risparmiare Wildcards.")
-
-st.title("🃏 MTGA AI Strategy Builder")
+file = st.file_uploader("Carica il tuo export CSV", type="csv")
 
 if file:
     df = pd.read_csv(file)
-    # Pulizia minima colonne
-    df.columns = [c.strip() for c in df.columns]
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        if st.button(f"🚀 Genera {archetipo} {get_mana_icons(colori)}"):
-            # Campionamento intelligente delle tue top cards
-            top_cards = df[df['Count'] > 0].sort_values(by='Rarity', ascending=False).head(100)
-            contesto_csv = top_cards[['Name', 'Count', 'Rarity']].to_string(index=False)
-            
-            prompt = f"""
-            Sei un esperto di Magic Arena e Untapped.gg. Crea un mazzo {formato} archetipo {archetipo}.
-            Colori: {', '.join(colori)}.
-            
-            REGOLE TECNICHE:
-            1. Analizza la SINERGIA tra le carte e ottimizza la CURVA DI MANA.
-            2. Usa i nomi delle carte in ITALIANO.
-            3. Includi una lista ESPORTABILE (es: 4 Nome Carta).
-            4. Se possibile, integra queste carte della mia collezione:
-            {contesto_csv}
-            
-            Restituisci solo la lista mazzo e una breve spiegazione della strategia.
-            """
-            
-            with st.spinner("Analizzando il meta e la tua collezione..."):
-                try:
-                    res = model.generate_content(prompt)
-                    testo_output = res.text
+    df.columns = [c.strip() for c in df.columns] # Pulizia nomi colonne
+    st.success(f"✅ Collezione caricata con successo.")
+
+    # Selettori Archetipo e Colori
+    formato = st.selectbox("Seleziona Formato", list(META_DATA.keys()))
+    archetipo = st.selectbox("Archetipo (Meta Untapped.gg)", META_DATA[formato])
+    colori = st.multiselect("Colori del Mazzo", ["White", "Blue", "Black", "Red", "Green"])
+
+    if st.button("🚀 GENERA E ANALIZZA MAZZO"):
+        # Campionamento collezione per contesto (Priorità Rare/Mitiche)
+        mie_carte = df[df['Count'] > 0].sort_values(by='Rarity', ascending=False).head(80)
+        contesto = mie_carte[['Name', 'Count']].to_string(index=False)
+
+        prompt = f"""
+        Sei un Pro Player di MTG Arena. Crea un mazzo {formato} di tipo {archetipo}.
+        Colori richiesti: {', '.join(colori)}.
+        
+        REGOLE FONDAMENTALI:
+        1. ANALISI: Controlla gli effetti delle carte, il costo di mana (CMC) e la SINERGIA complessiva.
+        2. LISTA: Fornisci SOLO la lista esportabile MTGA (es: 4 Nome Carta).
+        3. LINGUA: Usa esclusivamente i nomi delle carte in ITALIANO.
+        4. OTTIMIZZAZIONE: Usa il più possibile queste carte che possiedo:
+        {contesto}
+        """
+
+        with st.spinner("L'AI sta assemblando il mazzo perfetto..."):
+            try:
+                risposta = model_ai.generate_content(prompt)
+                testo_output = risposta.text
+                
+                # Pulizia testo per estrarre solo la lista
+                lista_clean = "\n".join([l for l in testo_output.split('\n') if re.match(r'^\d+\s', l)])
+                
+                st.subheader("📋 Lista Mazzo Esportabile")
+                st.code(lista_clean, language="text")
+                
+                # Analisi Wildcards
+                wcs, mancanti = analizza_mazzo_ita(lista_clean, df)
+                
+                st.divider()
+                st.subheader("💰 Bilancio Wildcards")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Comuni", wcs['Common'])
+                c2.metric("Non Comuni", wcs['Uncommon'])
+                c3.metric("Rare", wcs['Rare'])
+                c4.metric("Mitiche", wcs['Mythic'])
+
+                if mancanti:
+                    with st.expander("🔎 Dettaglio carte da craftare"):
+                        st.table(mancanti)
+                else:
+                    st.balloons()
+                    st.success("Ottimo! Hai tutte le carte per questo mazzo.")
                     
-                    # Separazione Lista e Strategia
-                    parti = testo_output.split("\n\n")
-                    lista_testo = "\n".join([line for line in testo_output.split('\n') if re.match(r'^\d+\s', line)])
-                    
-                    st.subheader("📋 Lista Esportabile")
-                    st.code(lista_testo, language="text")
-                    
-                    with st.expander("📖 Strategia e Sinergie"):
-                        st.write(testo_output)
-                        
-                    # Calcolo costi
-                    wcs, list_mancanti = analizza_mazzo(lista_testo, df)
-                    
-                    with col2:
-                        st.subheader("💰 Costo Stimato")
-                        st.metric("Rare", wcs['Rare'])
-                        st.metric("Mitiche", wcs['Mythic'])
-                        
-                        if list_mancanti:
-                            st.warning("Carte da creare:")
-                            st.table(list_mancanti)
-                        else:
-                            st.success("Puoi montarlo subito!")
-                            st.balloons()
-                            
-                except Exception as e:
-                    st.error(f"Errore: {e}")
+            except Exception as e:
+                st.error(f"Errore nella generazione: {e}")
 else:
-    st.warning("👈 Carica il tuo file CSV per iniziare l'analisi.")
-    st.markdown("""
-    ### Come ottenere il file CSV:
-    1. Usa un tracker come **Untapped.gg** o **MTGA Assistant**.
-    2. Vai nella sezione 'Collection' ed esporta in formato CSV.
-    3. Caricalo qui per ricevere consigli personalizzati.
-    """)
+    st.info("Trascina il tuo CSV per iniziare l'analisi personalizzata.")
+
+st.divider()
+st.caption("Powered by Gemini 3 Flash | Data based on Untapped.gg Meta 2026")
